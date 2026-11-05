@@ -1,7 +1,7 @@
 # Architecture: Create Plaid Link Token
 
-**Status**: Proposed logical architecture  
-**Feature**: `001-plaid-link-token`  
+**Status**: Proposed logical architecture
+**Feature**: `001-plaid-link-token`
 **Basis**: `plan.md`, `research.md`, `contracts/create-link-token.md`, `data-model.md`, and reviewed feature requirements in `spec_reviewed.md`
 
 ## 1. Scope and architecture decisions
@@ -101,10 +101,10 @@ sequenceDiagram
     Config->>KV: Get referenced credentials using managed/workload identity
     KV-->>Config: Secret values
     Config-->>App: Allowlisted environment, credentials, clientName, language, non-PII user ID
-    App->>Plaid: Create token (auth, US; no sessionId; trace context)
+    App->>Plaid: Create token request with auth product, US country, trace context, and no session ID
     Plaid-->>App: link_token, expiration OR provider error
     App->>App: Validate non-empty token and parseable expiration
-    App->>Audit: Record issued outcome (IDs, approved consumer reference, classification; no token/secrets)
+    App->>Audit: Record issued outcome with IDs, approved consumer reference, and classification without token or secrets
     Audit-->>App: Durable audit accepted
     App-->>API: CreateLinkTokenResult
     API-->>Caller: Success with token, expiration, original IDs
@@ -167,18 +167,18 @@ flowchart TB
 
 ### Controls
 
-| Threat / concern | Architecture control |
-| --- | --- |
-| Forged identity or cross-consumer access | Require SPD authentication; authorize the trusted principal for `consumerId`; avoid revealing whether another consumer exists. |
-| Invalid or unrelated onboarding session | Require an active session tied to the same consumer with phone verification complete before Plaid is called. |
-| Tenant/environment confusion or SSRF | Derive environment from trusted tenant deployment context; map to allowlisted Plaid base URLs; reject request-provided routing. |
-| Credential disclosure | Key Vault plus managed/workload identity; redact secret headers and payloads; exclude credentials from API responses, logs, audit, and telemetry. |
-| Token leakage or excessive retention | Request-local memory only; no database, cache, audit field, routine logging, or exception text; discard on every failure, including audit failure. |
-| Sensitive provider diagnostics | Classify by stable provider `error_type`/`error_code`; do not return raw body, `display_message`, or internal host details. |
-| Request spoofing / trace loss | Validate caller-supplied request/correlation IDs; preserve valid values unchanged; do not generate replacements; use approved propagation mechanisms. |
-| Replay or duplicate issuance assumptions | No idempotency promise and no automatic create retry; callers must treat repeated requests as independent issuance attempts. |
-| Excessive dependency exposure | Bounded timeouts, TLS, narrowly scoped adapters, and deployment egress restrictions. |
-| Audit bypass | Fail closed for successful issuance: no response token unless the required success audit has durably completed. |
+| Threat / concern                         | Architecture control                                                                                                                                  |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Forged identity or cross-consumer access | Require SPD authentication; authorize the trusted principal for `consumerId`; avoid revealing whether another consumer exists.                      |
+| Invalid or unrelated onboarding session  | Require an active session tied to the same consumer with phone verification complete before Plaid is called.                                          |
+| Tenant/environment confusion or SSRF     | Derive environment from trusted tenant deployment context; map to allowlisted Plaid base URLs; reject request-provided routing.                       |
+| Credential disclosure                    | Key Vault plus managed/workload identity; redact secret headers and payloads; exclude credentials from API responses, logs, audit, and telemetry.     |
+| Token leakage or excessive retention     | Request-local memory only; no database, cache, audit field, routine logging, or exception text; discard on every failure, including audit failure.    |
+| Sensitive provider diagnostics           | Classify by stable provider `error_type`/`error_code`; do not return raw body, `display_message`, or internal host details.                     |
+| Request spoofing / trace loss            | Validate caller-supplied request/correlation IDs; preserve valid values unchanged; do not generate replacements; use approved propagation mechanisms. |
+| Replay or duplicate issuance assumptions | No idempotency promise and no automatic create retry; callers must treat repeated requests as independent issuance attempts.                          |
+| Excessive dependency exposure            | Bounded timeouts, TLS, narrowly scoped adapters, and deployment egress restrictions.                                                                  |
+| Audit bypass                             | Fail closed for successful issuance: no response token unless the required success audit has durably completed.                                       |
 
 The `client_user_id` sent to Plaid must be a stable, unique, SPD-approved non-PII identifier. Do not use phone number, email, access token, or `sessionId`. Confirm whether the consumer key can be used directly or must be transformed under SPD privacy policy. Do not forward the SPD session ID to Plaid.
 
@@ -186,25 +186,25 @@ The `client_user_id` sent to Plaid must be a stable, unique, SPD-approved non-PI
 
 These are proposed logical types aligned with the plan and contracts, not existing source files. Names can be adapted to SPD conventions without changing the responsibility boundaries.
 
-| Type | Layer | Responsibility / invariants |
-| --- | --- | --- |
-| `CreateLinkTokenRequest` | API | Deserialize only caller-controlled fields (`sessionId`, `requestId`, `correlationId`); do not accept trusted principal, environment, credentials, products, or country codes. Consumer ID has one canonical source (route or body). |
-| `CreateLinkTokenEndpoint` | API | Map the established SPD route and HTTP contract to the application command; obtain principal from middleware; map success/failure to safe response envelopes. |
-| `CreateLinkTokenCommand` | Application/domain | Carry validated consumer/session/request/correlation IDs plus server-trusted principal and tenant context. Enforce that trust-derived values are not caller-deserialized. |
-| `CreateLinkTokenService` | Application | Orchestrate validation, consumer authorization, session verification, tenant configuration, Plaid call, response validation, audit, and result creation in the required order. Return either a complete result or a classified failure, never both. |
-| `RequestIdentifierValidator` (or equivalent) | Application/domain | Validate required ID formats and request shape before dependency calls; preserve valid supplied IDs; never manufacture replacements. |
-| `IConsumerAccessValidator` | Port | Check authenticated principal and authorization for the requested consumer; return a non-enumerating denial result. |
-| `IOnboardingSessionValidator` | Port | Verify session exists, is active, belongs to the consumer, and satisfies phone-verification state. |
-| `ITenantPlaidConfigurationResolver` | Port | Resolve trusted tenant environment, allowlisted base URL, Key Vault references, client name, language, and approved non-PII Plaid user ID mapping. |
-| `PlaidEnvironmentConfiguration` | Domain/configuration | Represent the resolved environment, allowlisted base URL, secret references, client name, language, and approved non-PII Plaid user ID; never accept it from caller input. |
-| `IAuditRecorder` | Port | Record required decision/outcome events with valid trace IDs and minimal approved consumer reference; its event model must have no token or credential field. |
-| `AuditEvent` | Domain/integration | Carry the event type, valid request/correlation IDs, minimal approved consumer reference, safe outcome classification, and timestamp; structurally exclude token and credentials. |
-| `PlaidLinkTokenClient` | Infrastructure | Typed `HttpClient` adapter for `/link/token/create`; construct fixed `products: ["auth"]` and `country_codes: ["US"]`; apply bounded timeout and approved trace propagation; perform no automatic retries. |
-| `PlaidResponseValidator` | Infrastructure/application | Reject missing/empty token or invalid/missing ISO-8601 expiration; retain the provider expiration instant without extending or inferring it. |
-| `PlaidErrorTranslator` | Infrastructure | Map provider error types/codes such as `INVALID_API_KEYS`, `RATE_LIMIT_EXCEEDED`, and `ITEM_LOGIN_REQUIRED` to stable internal classifications and retry guidance; avoid raw provider text. Validate mappings against the current Plaid catalog. |
-| `OperationFailure` | Domain | Hold a safe stable SPD code, generic message, retryability, optional safe retry delay, and valid IDs; never contain a token. |
-| `CreateLinkTokenResult` | Domain/API | Hold the token only for the in-flight response, Plaid expiration, and original IDs; prevent logging/serialization outside the success response path. |
-| SPD adapters | Infrastructure | Bind the logical ports to existing SPD identity/session/audit contracts; wire protocols and endpoint details are intentionally unspecified until those contracts are available. |
+| Type                                           | Layer                      | Responsibility / invariants                                                                                                                                                                                                                            |
+| ---------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CreateLinkTokenRequest`                     | API                        | Deserialize only caller-controlled fields (`sessionId`, `requestId`, `correlationId`); do not accept trusted principal, environment, credentials, products, or country codes. Consumer ID has one canonical source (route or body).              |
+| `CreateLinkTokenEndpoint`                    | API                        | Map the established SPD route and HTTP contract to the application command; obtain principal from middleware; map success/failure to safe response envelopes.                                                                                          |
+| `CreateLinkTokenCommand`                     | Application/domain         | Carry validated consumer/session/request/correlation IDs plus server-trusted principal and tenant context. Enforce that trust-derived values are not caller-deserialized.                                                                              |
+| `CreateLinkTokenService`                     | Application                | Orchestrate validation, consumer authorization, session verification, tenant configuration, Plaid call, response validation, audit, and result creation in the required order. Return either a complete result or a classified failure, never both.    |
+| `RequestIdentifierValidator` (or equivalent) | Application/domain         | Validate required ID formats and request shape before dependency calls; preserve valid supplied IDs; never manufacture replacements.                                                                                                                   |
+| `IConsumerAccessValidator`                   | Port                       | Check authenticated principal and authorization for the requested consumer; return a non-enumerating denial result.                                                                                                                                    |
+| `IOnboardingSessionValidator`                | Port                       | Verify session exists, is active, belongs to the consumer, and satisfies phone-verification state.                                                                                                                                                     |
+| `ITenantPlaidConfigurationResolver`          | Port                       | Resolve trusted tenant environment, allowlisted base URL, Key Vault references, client name, language, and approved non-PII Plaid user ID mapping.                                                                                                     |
+| `PlaidEnvironmentConfiguration`              | Domain/configuration       | Represent the resolved environment, allowlisted base URL, secret references, client name, language, and approved non-PII Plaid user ID; never accept it from caller input.                                                                             |
+| `IAuditRecorder`                             | Port                       | Record required decision/outcome events with valid trace IDs and minimal approved consumer reference; its event model must have no token or credential field.                                                                                          |
+| `AuditEvent`                                 | Domain/integration         | Carry the event type, valid request/correlation IDs, minimal approved consumer reference, safe outcome classification, and timestamp; structurally exclude token and credentials.                                                                      |
+| `PlaidLinkTokenClient`                       | Infrastructure             | Typed `HttpClient` adapter for `/link/token/create`; construct fixed `products: ["auth"]` and `country_codes: ["US"]`; apply bounded timeout and approved trace propagation; perform no automatic retries.                                     |
+| `PlaidResponseValidator`                     | Infrastructure/application | Reject missing/empty token or invalid/missing ISO-8601 expiration; retain the provider expiration instant without extending or inferring it.                                                                                                           |
+| `PlaidErrorTranslator`                       | Infrastructure             | Map provider error types/codes such as `INVALID_API_KEYS`, `RATE_LIMIT_EXCEEDED`, and `ITEM_LOGIN_REQUIRED` to stable internal classifications and retry guidance; avoid raw provider text. Validate mappings against the current Plaid catalog. |
+| `OperationFailure`                           | Domain                     | Hold a safe stable SPD code, generic message, retryability, optional safe retry delay, and valid IDs; never contain a token.                                                                                                                           |
+| `CreateLinkTokenResult`                      | Domain/API                 | Hold the token only for the in-flight response, Plaid expiration, and original IDs; prevent logging/serialization outside the success response path.                                                                                                   |
+| SPD adapters                                   | Infrastructure             | Bind the logical ports to existing SPD identity/session/audit contracts; wire protocols and endpoint details are intentionally unspecified until those contracts are available.                                                                        |
 
 ## 7. Error handling flows
 
@@ -252,21 +252,21 @@ flowchart TD
 
 ### Classification and response behavior
 
-| Failure point | Classification / handling | Plaid called? | Response and audit behavior |
-| --- | --- | ---: | --- |
-| Missing/malformed request, consumer, session, or trace ID | `INVALID_REQUEST` | No | Preserve only valid supplied IDs; emit required security/failure audit event per SPD policy; no fabricated IDs. |
-| Authentication absent/invalid | `UNAUTHENTICATED` | No | No token; record required security outcome according to SPD conventions. |
-| Consumer authorization denied | `INVALID_CONSUMER` | No | Non-enumerating response; no token; record approved outcome. |
-| Session inactive, mismatched, or not phone-verified | `INVALID_SESSION` | No | No token; record approved outcome. |
-| Tenant config / Key Vault resolution failure | Safe configuration or dependency failure (map to SPD's stable code; do not reveal secret/reference details) | No | No token; alert through approved operational channel as appropriate. |
-| Network timeout/connectivity | `NETWORK_FAILURE` | Yes | Caller retry guidance may be provided; the service does not retry token creation. Preserve valid IDs. |
-| Plaid invalid credentials (`INVALID_API_KEYS`) | `PLAID_AUTHENTICATION_FAILURE` | Yes | Non-retryable by caller; operator action/alert; no raw provider details. |
-| Plaid rate limit (`RATE_LIMIT_EXCEEDED`) | `RATE_LIMITED` | Yes | Retry only after safe delay; expose `Retry-After` only if SPD conventions allow. |
-| Plaid item login required (`ITEM_LOGIN_REQUIRED`) | `LINK_REAUTH_REQUIRED` | Yes | No blind retry; caller initiates appropriate Link recovery/update flow. |
-| Plaid outage/transient upstream failure | `PLAID_UNAVAILABLE` | Yes | Safe caller retry guidance; no automatic create retry. |
-| Plaid response missing token or invalid/missing expiration | Provider failure / safe internal classification | Yes | Discard partial response; no token; audit failure outcome. |
-| Required success audit fails after token issuance | `AUDIT_UNAVAILABLE` | Yes | Discard token; do not return partial success. A later caller retry is an independent issuance attempt. |
-| Unexpected exception | `INTERNAL_ERROR` | Depends on failure point | Generic message only; retain approved trace IDs and emit redacted diagnostics. |
+| Failure point                                              | Classification / handling                                                                                   |            Plaid called? | Response and audit behavior                                                                                     |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | -----------------------: | --------------------------------------------------------------------------------------------------------------- |
+| Missing/malformed request, consumer, session, or trace ID  | `INVALID_REQUEST`                                                                                         |                       No | Preserve only valid supplied IDs; emit required security/failure audit event per SPD policy; no fabricated IDs. |
+| Authentication absent/invalid                              | `UNAUTHENTICATED`                                                                                         |                       No | No token; record required security outcome according to SPD conventions.                                        |
+| Consumer authorization denied                              | `INVALID_CONSUMER`                                                                                        |                       No | Non-enumerating response; no token; record approved outcome.                                                    |
+| Session inactive, mismatched, or not phone-verified        | `INVALID_SESSION`                                                                                         |                       No | No token; record approved outcome.                                                                              |
+| Tenant config / Key Vault resolution failure               | Safe configuration or dependency failure (map to SPD's stable code; do not reveal secret/reference details) |                       No | No token; alert through approved operational channel as appropriate.                                            |
+| Network timeout/connectivity                               | `NETWORK_FAILURE`                                                                                         |                      Yes | Caller retry guidance may be provided; the service does not retry token creation. Preserve valid IDs.           |
+| Plaid invalid credentials (`INVALID_API_KEYS`)           | `PLAID_AUTHENTICATION_FAILURE`                                                                            |                      Yes | Non-retryable by caller; operator action/alert; no raw provider details.                                        |
+| Plaid rate limit (`RATE_LIMIT_EXCEEDED`)                 | `RATE_LIMITED`                                                                                            |                      Yes | Retry only after safe delay; expose `Retry-After` only if SPD conventions allow.                              |
+| Plaid item login required (`ITEM_LOGIN_REQUIRED`)        | `LINK_REAUTH_REQUIRED`                                                                                    |                      Yes | No blind retry; caller initiates appropriate Link recovery/update flow.                                         |
+| Plaid outage/transient upstream failure                    | `PLAID_UNAVAILABLE`                                                                                       |                      Yes | Safe caller retry guidance; no automatic create retry.                                                          |
+| Plaid response missing token or invalid/missing expiration | Provider failure / safe internal classification                                                             |                      Yes | Discard partial response; no token; audit failure outcome.                                                      |
+| Required success audit fails after token issuance          | `AUDIT_UNAVAILABLE`                                                                                       |                      Yes | Discard token; do not return partial success. A later caller retry is an independent issuance attempt.          |
+| Unexpected exception                                       | `INTERNAL_ERROR`                                                                                          | Depends on failure point | Generic message only; retain approved trace IDs and emit redacted diagnostics.                                  |
 
 Failure audit writes must never contain a token or credentials. If recording a failure event itself fails, do not replace the original safe failure with sensitive diagnostics; report the audit dependency failure only through approved internal telemetry. The SPD audit contract must define whether such secondary audit failure overrides a caller-facing failure code. For a success-path audit failure, `AUDIT_UNAVAILABLE` takes precedence because success cannot be returned.
 
